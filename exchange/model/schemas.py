@@ -1,6 +1,8 @@
 from pydantic import BaseModel, BaseSettings, validator, root_validator
-from typing import Literal
+from typing import Literal, Dict, Any
 import os
+import json
+import ipaddress
 from pathlib import Path
 from enum import Enum
 from devtools import debug
@@ -90,6 +92,8 @@ class Settings(BaseSettings):
     WHITELIST: list[str] | None = None
     PORT: int | None = None
     DISCORD_WEBHOOK_URL: str | None = None
+    
+    # 거래소 API 키들
     UPBIT_KEY: str | None = None
     UPBIT_SECRET: str | None = None
     BINANCE_KEY: str | None = None
@@ -102,54 +106,83 @@ class Settings(BaseSettings):
     OKX_KEY: str | None = None
     OKX_SECRET: str | None = None
     OKX_PASSPHRASE: str | None = None
-    KIS1_ACCOUNT_NUMBER: str | None = None
-    KIS1_ACCOUNT_CODE: str | None = None
-    KIS1_KEY: str | None = None
-    KIS1_SECRET: str | None = None
-    KIS2_ACCOUNT_NUMBER: str | None = None
-    KIS2_ACCOUNT_CODE: str | None = None
-    KIS2_KEY: str | None = None
-    KIS2_SECRET: str | None = None
-    KIS3_ACCOUNT_NUMBER: str | None = None
-    KIS3_ACCOUNT_CODE: str | None = None
-    KIS3_KEY: str | None = None
-    KIS3_SECRET: str | None = None
-    KIS4_ACCOUNT_NUMBER: str | None = None
-    KIS4_ACCOUNT_CODE: str | None = None
-    KIS4_KEY: str | None = None
-    KIS4_SECRET: str | None = None
-    # KIS5~KIS50 추가
-    KIS5_ACCOUNT_NUMBER: str | None = None
-    KIS5_ACCOUNT_CODE: str | None = None
-    KIS5_KEY: str | None = None
-    KIS5_SECRET: str | None = None
-    KIS6_ACCOUNT_NUMBER: str | None = None
-    KIS6_ACCOUNT_CODE: str | None = None
-    KIS6_KEY: str | None = None
-    KIS6_SECRET: str | None = None
-    KIS7_ACCOUNT_NUMBER: str | None = None
-    KIS7_ACCOUNT_CODE: str | None = None
-    KIS7_KEY: str | None = None
-    KIS7_SECRET: str | None = None
-    KIS8_ACCOUNT_NUMBER: str | None = None
-    KIS8_ACCOUNT_CODE: str | None = None
-    KIS8_KEY: str | None = None
-    KIS8_SECRET: str | None = None
-    KIS9_ACCOUNT_NUMBER: str | None = None
-    KIS9_ACCOUNT_CODE: str | None = None
-    KIS9_KEY: str | None = None
-    KIS9_SECRET: str | None = None
-    KIS10_ACCOUNT_NUMBER: str | None = None
-    KIS10_ACCOUNT_CODE: str | None = None
-    KIS10_KEY: str | None = None
-    KIS10_SECRET: str | None = None
-    # 동적으로 KIS11~KIS50 처리를 위한 설정 추가 가능
+    
+    # 데이터베이스 설정
     DB_ID: str = "poa@admin.com"
     DB_PASSWORD: str = "poabot!@#$"
 
     class Config:
-        env_file = env_path  # ".env"
+        env_file = env_path
         env_file_encoding = "utf-8"
+        # 추가 환경 변수 허용 (KIS1~KIS50 동적 처리)
+        extra = "allow"
+    
+    def __getattr__(self, name: str) -> Any:
+        """동적 KIS 설정 접근을 위한 메서드"""
+        if name.startswith("KIS") and name.endswith(("_KEY", "_SECRET", "_ACCOUNT_NUMBER", "_ACCOUNT_CODE")):
+            # 환경 변수에서 직접 읽기
+            value = os.getenv(name)
+            return value
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'") 
+    
+    def get_kis_settings(self, kis_number: int) -> tuple[str, str, str, str] | None:
+        """지정된 KIS 번호의 설정을 반환"""
+        if not 1 <= kis_number <= 50:
+            return None
+            
+        prefix = f"KIS{kis_number}"
+        
+        key = os.getenv(f"{prefix}_KEY")
+        secret = os.getenv(f"{prefix}_SECRET")
+        account_number = os.getenv(f"{prefix}_ACCOUNT_NUMBER")
+        account_code = os.getenv(f"{prefix}_ACCOUNT_CODE")
+        
+        if all([key, secret, account_number, account_code]):
+            return key, secret, account_number, account_code
+        
+        return None
+    
+    def has_kis_settings(self, kis_number: int) -> bool:
+        """지정된 KIS 번호의 설정이 있는지 확인"""
+        return self.get_kis_settings(kis_number) is not None
+    
+    def get_available_kis_numbers(self) -> list[int]:
+        """사용 가능한 KIS 번호 목록 반환"""
+        available = []
+        for i in range(1, 51):
+            if self.has_kis_settings(i):
+                available.append(i)
+        return available
+    
+    @validator("WHITELIST", pre=True, always=True)
+    def validate_whitelist(cls, v):
+        """화이트리스트 IP 주소 유효성 검사"""
+        if v is None:
+            return []
+        
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except json.JSONDecodeError:
+                # 문자열이 JSON이 아닌 경우 콤마로 분할
+                v = [ip.strip() for ip in v.split(',')]
+        
+        if not isinstance(v, list):
+            return []
+        
+        validated_ips = []
+        for ip in v:
+            if ip and ip.strip():
+                ip = ip.strip()
+                try:
+                    # IP 주소 유효성 검사
+                    ipaddress.ip_address(ip)
+                    validated_ips.append(ip)
+                except ValueError:
+                    # 유효하지 않은 IP는 무시
+                    continue
+        
+        return validated_ips
 
 
 def get_extra_order_info(order_info):
@@ -283,10 +316,13 @@ class OrderBase(OrderRequest):
 
     @validator("password")
     def password_validate(cls, v):
-        setting = Settings()
-        if v != setting.PASSWORD:
-            raise ValueError("비밀번호가 틀렸습니다")
-        return v
+        try:
+            setting = Settings()
+            if v != setting.PASSWORD:
+                raise ValueError("비밀번호가 틀렸습니다")
+            return v
+        except Exception as e:
+            raise ValueError(f"비밀번호 검증 중 오류: {str(e)}")
 
 
 class MarketOrder(OrderBase):
@@ -343,10 +379,13 @@ class HedgeData(BaseModel):
 
     @validator("password")
     def password_validate(cls, v):
-        setting = Settings()
-        if v != setting.PASSWORD:
-            raise ValueError("비밀번호가 틀렸습니다")
-        return v
+        try:
+            setting = Settings()
+            if v != setting.PASSWORD:
+                raise ValueError("비밀번호가 틀렸습니다")
+            return v
+        except Exception as e:
+            raise ValueError(f"비밀번호 검증 중 오류: {str(e)}")
 
     @root_validator(pre=True)
     def root_validate(cls, values):

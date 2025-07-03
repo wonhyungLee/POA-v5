@@ -1,0 +1,356 @@
+#cloud-config
+
+# POA 시스템 개선된 Cloud-Init 설정
+# 동적 설정 관리 시스템 적용
+
+# 패키지 관리
+packages_update: true
+packages_upgrade: true
+packages:
+  - npm
+  - python3-pip
+  - python3.10-venv
+  - net-tools
+  - unzip
+  - ntp
+  - curl
+  - jq
+  - htop
+  - git
+
+# 시스템 로케일 설정
+locale: ko_KR.UTF-8
+
+# 파일 생성 및 설정
+write_files:
+  # PM2 Systemd 서비스 유닛
+  - path: /etc/systemd/system/pm2-root.service
+    owner: root:root
+    permissions: '0755'
+    content: |
+      [Unit]
+      Description=PM2 process manager
+      Documentation=https://pm2.keymetrics.io/
+      After=network.target
+      [Service]
+      Type=forking
+      User=root
+      LimitNOFILE=infinity
+      LimitNPROC=infinity
+      LimitCORE=infinity
+      Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+      Environment=PM2_HOME=/root/.pm2
+      PIDFile=/root/.pm2/pm2.pid
+      Restart=on-failure
+      ExecStart=/usr/local/lib/node_modules/pm2/bin/pm2 resurrect
+      ExecReload=/usr/local/lib/node_modules/pm2/bin/pm2 reload all
+      ExecStop=/usr/local/lib/node_modules/pm2/bin/pm2 kill
+      [Install]
+      WantedBy=multi-user.target
+
+  # NTPD 시간 동기화 서비스 유닛
+  - path: /etc/systemd/system/ntpd-sync.service
+    owner: root:root
+    permissions: '0755'
+    content: |
+      [Unit]
+      Description=Sync system time every 5 minutes
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/ntpd -qg
+
+  # NTPD 시간 동기화 타이머 유닛
+  - path: /etc/systemd/system/ntpd-sync.timer
+    owner: root:root
+    permissions: '0755'
+    content: |
+      [Unit]
+      Description=Run ntpd-sync.service every 5 minutes
+      [Timer]
+      OnBootSec=5min
+      OnUnitActiveSec=5min
+      [Install]
+      WantedBy=timers.target
+
+  # PocketBase 서비스 유닛
+  - path: /etc/systemd/system/pocketbase.service
+    owner: root:root
+    permissions: '0755'
+    content: |
+      [Unit]
+      Description=pocketbase
+      After=network.target
+      [Service]
+      Type=simple
+      User=root
+      Group=root
+      LimitNOFILE=4096
+      Restart=always
+      RestartSec=5s
+      StandardOutput=append:/root/logs/pocketbase.log
+      StandardError=append:/root/logs/pocketbase.log
+      ExecStart=/root/db/pocketbase serve --http="0.0.0.0:8090"
+      [Install]
+      WantedBy=multi-user.target
+
+  # 최소한의 환경 변수 파일 (템플릿)
+  - path: /root/.env.minimal
+    content: |
+      # 최소 설정 템플릿 - 실제 .env 파일은 별도 설정 필요
+      PASSWORD="changeme_secure_password"
+      PORT="80"
+      DB_ID="poa@admin.com"
+      DB_PASSWORD="poabot!@#$"
+      WHITELIST=["127.0.0.1"]
+      DISCORD_WEBHOOK_URL=""
+
+  # 시스템 환경 변수
+  - path: /etc/environment
+    content: |
+      DOMAIN=""
+      APP_NAME="POA"
+      LOG_LEVEL="INFO"
+    append: true
+
+  # 개선된 Bash 함수들
+  - path: /root/.bash_functions
+    content: |
+      #!/bin/bash
+      # POA 시스템 관리 함수들
+      
+      # 환경 변수 로드
+      if [[ -f /etc/environment ]]; then
+          source /etc/environment
+      fi
+      
+      # 기본 설정
+      if [[ -z "$DOMAIN" ]]; then
+        domain="127.0.0.1"
+        is_domain=false
+        port="80"
+      else
+        domain="$DOMAIN"
+        is_domain=true
+        port="8000"
+      fi
+      
+      if [[ -z "$APP_NAME" ]]; then
+        app_name="POA"
+      else
+        app_name=$APP_NAME
+      fi
+      
+      app_dir="/root/$app_name"
+      interpreter_path="/root/POA/.venv/bin/python3.10"
+      
+      # 환경 정보 출력
+      print_env() {
+        echo "=== POA 시스템 환경 정보 ==="
+        echo "Domain: $domain"
+        echo "Port: $port"
+        echo "App Name: $app_name"
+        echo "App Dir: $app_dir"
+        echo "Python: $interpreter_path"
+        echo "=========================="
+      }
+      
+      # 서비스 관리
+      poa_status() {
+        /root/POA/scripts/service_manager.sh status
+      }
+      
+      poa_logs() {
+        /root/POA/scripts/service_manager.sh logs
+      }
+      
+      poa_restart() {
+        /root/POA/scripts/service_manager.sh restart
+      }
+      
+      poa_stop() {
+        /root/POA/scripts/service_manager.sh stop
+      }
+      
+      poa_health() {
+        /root/POA/scripts/service_manager.sh health
+      }
+      
+      # 설정 관리
+      poa_config() {
+        case "$1" in
+          "validate")
+            /root/POA/scripts/env_manager.sh validate
+            ;;
+          "list")
+            /root/POA/scripts/env_manager.sh list
+            ;;
+          "help")
+            echo "사용법: poa_config [validate|list|help]"
+            ;;
+          *)
+            echo "POA 설정 관리"
+            echo "사용법: poa_config [validate|list|help]"
+            ;;
+        esac
+      }
+      
+      # KIS 계정 관리
+      poa_kis() {
+        case "$1" in
+          "add")
+            /root/POA/scripts/env_manager.sh add_kis "$2" "$3" "$4" "$5" "$6"
+            ;;
+          "remove")
+            /root/POA/scripts/env_manager.sh remove_kis "$2"
+            ;;
+          "help")
+            echo "사용법: poa_kis [add|remove|help]"
+            echo "  add: poa_kis add kis_number key secret account_number account_code"
+            echo "  remove: poa_kis remove kis_number"
+            ;;
+          *)
+            echo "POA KIS 계정 관리"
+            echo "사용법: poa_kis [add|remove|help]"
+            ;;
+        esac
+      }
+      
+      # 시스템 모니터링
+      poa_monitor() {
+        curl -s http://localhost/monitor/health | jq . || echo "모니터링 API 연결 실패"
+      }
+      
+      # 초기 설정
+      poa_setup() {
+        /root/POA/scripts/initial_setup.sh
+      }
+      
+      # 함수 내보내기
+      export -f print_env poa_status poa_logs poa_restart poa_stop poa_health
+      export -f poa_config poa_kis poa_monitor poa_setup
+      
+      # 시작 시 환경 정보 출력
+      print_env
+
+  # .bashrc에 함수 소스 추가
+  - path: /root/.bashrc
+    content: |
+      # POA 시스템 관리 함수 로드
+      if [ -f ~/.bash_functions ]; then
+        source ~/.bash_functions
+      fi
+      
+      # POA 시스템 별칭
+      alias poa-status='poa_status'
+      alias poa-logs='poa_logs'
+      alias poa-restart='poa_restart'
+      alias poa-stop='poa_stop'
+      alias poa-health='poa_health'
+      alias poa-config='poa_config'
+      alias poa-kis='poa_kis'
+      alias poa-monitor='poa_monitor'
+      alias poa-setup='poa_setup'
+    append: true
+
+  # 로그 로테이션 설정
+  - path: /etc/logrotate.d/poa
+    content: |
+      /root/logs/*.log {
+        daily
+        missingok
+        rotate 30
+        compress
+        delaycompress
+        notifempty
+        create 0644 root root
+        postrotate
+          systemctl reload pocketbase > /dev/null 2>&1 || true
+        endscript
+      }
+
+# 실행 명령어들
+runcmd:
+  - export HOME="/root"
+  - timedatectl set-timezone Asia/Seoul
+  
+  # 방화벽 설정
+  - ufw allow ssh
+  - ufw allow 123/udp
+  - ufw allow from 52.89.214.238 to any port 80,443 proto tcp
+  - ufw allow from 34.212.75.30 to any port 80,443 proto tcp
+  - ufw allow from 54.218.53.128 to any port 80,443 proto tcp
+  - ufw allow from 52.32.178.7 to any port 80,443 proto tcp
+  - ufw --force enable
+  
+  # Node.js 및 PM2 설치
+  - npm install pm2@latest -g
+  - npm cache clean --force
+  - npm install n -g
+  - n stable
+  
+  # Caddy 설치
+  - n=0; while [ $n -lt 5 ] && ! wget https://github.com/caddyserver/caddy/releases/download/v2.6.4/caddy_2.6.4_linux_amd64.tar.gz; do echo "Caddy 다운로드 재시도..."; sleep 5; n=$((n+1)); done
+  - tar -xf caddy_*_linux_amd64.tar.gz
+  - mv caddy /usr/bin/
+  - chmod +x /usr/bin/caddy
+  - rm -rf caddy_*_linux_amd64.tar.gz
+  
+  # 디렉토리 생성
+  - mkdir -p /root/logs /root/backups /root/db /root/config
+  
+  # POA 소스 코드 다운로드
+  - git clone "https://github.com/wonhyungLee/POA-v5.git" /root/POA
+  
+  # PocketBase 설치
+  - n=0; while [ $n -lt 5 ] && ! wget "https://github.com/pocketbase/pocketbase/releases/download/v0.16.6/pocketbase_0.16.6_linux_amd64.zip" -O /root/pocketbase.zip; do echo "PocketBase 다운로드 재시도..."; sleep 5; n=$((n+1)); done
+  - unzip -j /root/pocketbase.zip pocketbase -d /root/db
+  - chmod +x /root/db/pocketbase
+  - rm -rf /root/pocketbase.zip
+  
+  # PocketBase 데이터 복사
+  - cp -rf /root/POA/pb_data /root/db/pb_data
+  
+  # Python 가상환경 설정
+  - python3.10 -m venv /root/POA/.venv
+  - /root/POA/.venv/bin/python3.10 -m pip install -r /root/POA/requirements.txt
+  
+  # 스크립트 권한 설정
+  - chmod +x /root/POA/scripts/*.sh
+  - chmod +x /root/.bash_functions
+  
+  # 환경 변수 초기 설정 (최소 설정만)
+  - cp /root/.env.minimal /root/.env
+  
+  # 시스템 서비스 설정
+  - systemctl daemon-reload
+  - systemctl stop ntp
+  - systemctl disable ntp
+  - systemctl enable pm2-root.service
+  - systemctl enable pocketbase.service
+  - systemctl enable ntpd-sync.service
+  - systemctl enable ntpd-sync.timer
+  
+  # 서비스 시작
+  - systemctl start pocketbase
+  - systemctl start ntpd-sync.timer
+  
+  # 초기 설정 실행
+  - /root/POA/scripts/initial_setup.sh
+  
+  # 최종 메시지
+  - echo "===========================================" >> /root/setup.log
+  - echo "POA 시스템 초기 설치 완료" >> /root/setup.log
+  - echo "다음 단계:" >> /root/setup.log
+  - echo "1. SSH로 서버 접속" >> /root/setup.log
+  - echo "2. nano /root/.env 으로 환경 변수 설정" >> /root/setup.log
+  - echo "3. poa_config validate 로 설정 검증" >> /root/setup.log
+  - echo "4. poa_restart 로 서비스 시작" >> /root/setup.log
+  - echo "5. poa_health 로 시스템 상태 확인" >> /root/setup.log
+  - echo "===========================================" >> /root/setup.log
+  - cat /root/setup.log
+
+# 전원 관리 (재부팅 없이 완료)
+power_state:
+  delay: "+0"
+  mode: reboot
+  message: "POA 시스템 초기 설치 완료 - 재부팅 중"

@@ -1,6 +1,7 @@
 from datetime import datetime
 import json
 import httpx
+import time
 from exchange.stock.error import TokenExpired
 from exchange.stock.schemas import *
 from exchange.database import db
@@ -9,6 +10,10 @@ import traceback
 import copy
 from exchange.model import MarketOrder
 from devtools import debug
+import logging
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
 
 
 class KoreaInvestment:
@@ -83,14 +88,21 @@ class KoreaInvestment:
         self.write_json("auth.json", auth)
 
     def check_auth(self, auth, key, secret, kis_number):
+        """인증 토큰 유효성 검사"""
         if auth is None:
+            logger.debug(f"KIS{kis_number}: 인증 정보가 없음")
             return False
-        access_token, access_token_token_expired = auth
+        
         try:
+            access_token, access_token_token_expired = auth
+            
             if access_token == "nothing":
+                logger.debug(f"KIS{kis_number}: 토큰이 'nothing'으로 설정됨")
                 return False
-            else:
-                if not self.is_auth:
+            
+            # 토큰 유효성 API 호출 테스트
+            if not self.is_auth:
+                try:
                     response = self.session.get(
                         "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/inquire-ccnl",
                         headers={
@@ -104,35 +116,105 @@ class KoreaInvestment:
                             "FID_COND_MRKT_DIV_CODE": "J",
                             "FID_INPUT_ISCD": "005930",
                         },
-                    ).json()
-                    if response["msg_cd"] == "EGW00123":
+                        timeout=10  # 타임아웃 추가
+                    )
+                    
+                    if response.status_code != 200:
+                        logger.warning(f"KIS{kis_number}: API 호출 실패 - HTTP {response.status_code}")
                         return False
-
-            access_token_token_expired = datetime.strptime(
-                access_token_token_expired, "%Y-%m-%d %H:%M:%S"
-            )
-            diff = access_token_token_expired - datetime.now()
-            total_seconds = diff.total_seconds()
-            if total_seconds < 60 * 60:
-                return False
-            else:
+                    
+                    response_data = response.json()
+                    if response_data.get("msg_cd") == "EGW00123":
+                        logger.debug(f"KIS{kis_number}: 토큰이 만료됨")
+                        return False
+                        
+                except httpx.TimeoutException:
+                    logger.warning(f"KIS{kis_number}: API 호출 타임아웃")
+                    return False
+                except httpx.HTTPStatusError as e:
+                    logger.warning(f"KIS{kis_number}: API 호출 HTTP 오류 - {e.response.status_code}")
+                    return False
+                except Exception as e:
+                    logger.warning(f"KIS{kis_number}: API 호출 중 오류 - {str(e)}")
+                    return False
+            
+            # 토큰 만료 시간 체크
+            try:
+                access_token_token_expired = datetime.strptime(
+                    access_token_token_expired, "%Y-%m-%d %H:%M:%S"
+                )
+                diff = access_token_token_expired - datetime.now()
+                total_seconds = diff.total_seconds()
+                
+                # 1시간 이상 남아있어야 유효
+                if total_seconds < 3600:
+                    logger.debug(f"KIS{kis_number}: 토큰 만료 시간 임박 - {total_seconds/60:.1f}분 남음")
+                    return False
+                
+                logger.debug(f"KIS{kis_number}: 토큰 유효 - {total_seconds/3600:.1f}시간 남음")
                 return True
-
+                
+            except (ValueError, TypeError) as e:
+                logger.error(f"KIS{kis_number}: 토큰 만료 시간 파싱 오류 - {str(e)}")
+                return False
+                
         except Exception as e:
-            print(traceback.format_exc())
+            logger.error(f"KIS{kis_number}: 인증 체크 중 오류 - {traceback.format_exc()}")
+            return False
 
     def create_auth(self, key: str, secret: str):
+        """새로운 인증 토큰 생성"""
         data = {"grant_type": "client_credentials", "appkey": key, "appsecret": secret}
         base_url = BaseUrls.base_url.value
         endpoint = "/oauth2/tokenP"
-
         url = f"{base_url}{endpoint}"
-
-        response = self.session.post(url, json=data).json()
-        if "access_token" in response.keys() or response.get("rt_cd") == "0":
-            return response["access_token"], response["access_token_token_expired"]
-        else:
-            raise Exception(response)
+        
+        max_retries = 3
+        base_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                logger.debug(f"KIS{self.kis_number}: 토큰 생성 시도 {attempt + 1}/{max_retries}")
+                
+                response = self.session.post(url, json=data, timeout=30)
+                
+                if response.status_code != 200:
+                    raise httpx.HTTPStatusError(f"HTTP {response.status_code}", request=None, response=response)
+                
+                response_data = response.json()
+                
+                if "access_token" in response_data.keys() or response_data.get("rt_cd") == "0":
+                    logger.info(f"KIS{self.kis_number}: 토큰 생성 성공")
+                    return response_data["access_token"], response_data["access_token_token_expired"]
+                else:
+                    error_msg = response_data.get("msg1", "알 수 없는 오류")
+                    raise Exception(f"토큰 생성 실패: {error_msg}")
+                    
+            except httpx.TimeoutException:
+                logger.warning(f"KIS{self.kis_number}: 토큰 생성 타임아웃 (시도 {attempt + 1})")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+                raise Exception("토큰 생성 타임아웃")
+                
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"KIS{self.kis_number}: 토큰 생성 HTTP 오류 - {e.response.status_code}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+                raise Exception(f"토큰 생성 HTTP 오류: {e.response.status_code}")
+                
+            except Exception as e:
+                logger.error(f"KIS{self.kis_number}: 토큰 생성 중 오류 - {str(e)}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+                raise e
+        
+        raise Exception("토큰 생성 최대 재시도 횟수 초과")
 
     def auth(self):
         auth_id = f"KIS{self.kis_number}"
@@ -161,11 +243,17 @@ class KoreaInvestment:
         price: int = 0,
         mintick=0.01,
     ):
-        max_retries = 3
+        """개선된 주문 생성 메서드 (재시도 로직 강화)"""
+        max_retries = 5
+        base_delay = 1
         last_exception = None
+        
+        logger.info(f"KIS{self.kis_number}: {exchange} {ticker} {side} {amount} 주문 시도")
         
         for attempt in range(max_retries):
             try:
+                logger.debug(f"KIS{self.kis_number}: 주문 시도 {attempt + 1}/{max_retries}")
+                
                 endpoint = (
                     Endpoints.korea_order.value
                     if exchange == "KRX"
@@ -243,13 +331,58 @@ class KoreaInvestment:
                             OVRS_ORD_UNPR=price,
                             OVRS_EXCG_CD=exchange_code,
                         )
-                return self.post(endpoint, body, headers)
+                        
+                result = self.post(endpoint, body, headers)
+                
+                # 성공 응답 체크
+                if result.get("rt_cd") == "0":
+                    logger.info(f"KIS{self.kis_number}: 주문 성공 - {result.get('msg1', '')}")
+                    return result
+                else:
+                    # API 오류 응답 처리
+                    error_msg = result.get("msg1", "알 수 없는 오류")
+                    raise Exception(f"주문 실패: {error_msg}")
+                    
+            except httpx.TimeoutException:
+                logger.warning(f"KIS{self.kis_number}: 주문 타임아웃 (시도 {attempt + 1})")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+                    continue
+                raise Exception("네트워크 타임아웃")
+                
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"KIS{self.kis_number}: 주문 HTTP 오류 - {e.response.status_code}")
+                if e.response.status_code == 429:  # Rate limit
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        time.sleep(delay)
+                        continue
+                raise Exception(f"HTTP 오류: {e.response.status_code}")
+                
             except Exception as e:
                 last_exception = e
-                if attempt < max_retries - 1:  
-                    continue
-                else:
-                    raise last_exception 
+                error_msg = str(e)
+                
+                # 특정 오류에 대한 재시도 로직
+                if any(keyword in error_msg.lower() for keyword in ["internal error", "overloaded", "server error"]):
+                    logger.warning(f"KIS{self.kis_number}: 서버 오류로 재시도 (시도 {attempt + 1}) - {error_msg}")
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        time.sleep(delay)
+                        continue
+                
+                # 재시도 불가능한 오류들
+                if any(keyword in error_msg.lower() for keyword in 
+                       ["invalid", "unauthorized", "forbidden", "not found", "비밀번호"]):
+                    logger.error(f"KIS{self.kis_number}: 재시도 불가 오류 - {error_msg}")
+                    raise last_exception
+                
+                logger.warning(f"KIS{self.kis_number}: 주문 오류 (시도 {attempt + 1}) - {error_msg}")
+                if attempt == max_retries - 1:
+                    raise last_exception
+                    
+        raise Exception("최대 재시도 횟수 초과") 
 
     def create_market_buy_order(
         self,

@@ -6,22 +6,25 @@ from fastapi import FastAPI, Request, status, BackgroundTasks
 from fastapi.responses import ORJSONResponse, RedirectResponse
 from fastapi.exceptions import RequestValidationError
 import httpx
+from datetime import datetime
 from exchange.stock.kis import KoreaInvestment
 from exchange.model import MarketOrder, PriceRequest, HedgeData, OrderRequest
-from exchange.utility import (
-    settings,
-    log_order_message,
-    log_alert_message,
-    print_alert_message,
-    logger_test,
-    log_order_error_message,
-    log_validation_error_message,
-    log_hedge_message,
-    log_error_message,
+from exchange.utils.logging_config import (
+    setup_logging,
     log_message,
+    log_order_message,
+    log_order_error_message,
+    log_error_message,
+    log_system_message,
+    log_config_message,
+    poa_logger
 )
 import traceback
-from exchange import get_exchange, log_message, db, settings, get_bot, pocket
+from exchange import get_exchange, db, settings, get_bot, pocket
+from exchange.utility import log_alert_message, print_alert_message, log_hedge_message, log_validation_error_message
+from exchange.utils.validation import validate_environment, print_environment_summary
+from exchange.utils.config_manager import config_manager, KISAccountConfig, EnvVarConfig, ExchangeConfig
+from exchange.utils.memory_monitor import start_system_monitoring, stop_system_monitoring, get_system_status, get_system_history, get_system_summary, force_gc
 import ipaddress
 import os
 import sys
@@ -50,11 +53,35 @@ def get_error(e):
 
 @app.on_event("startup")
 async def startup():
-    log_message(f"POABOT 실행 완료! - 버전:{VERSION}")
+    # 로깅 시스템 초기화
+    setup_logging()
+    log_system_message("POA 시스템 시작")
+    
+    # 시스템 모니터링 시작
+    start_system_monitoring()
+    
+    # 환경 변수 검증
+    is_valid, errors = validate_environment()
+    if not is_valid:
+        log_error_message("환경 변수 검증 실패. 서버를 종료합니다.", "STARTUP")
+        for error in errors:
+            log_error_message(f"  - {error}", "STARTUP")
+        sys.exit(1)
+    
+    # 환경 변수 요약 출력
+    print_environment_summary()
+    
+    log_system_message(f"POABOT 실행 완료! - 버전:{VERSION}")
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    log_system_message("POA 시스템 종료")
+    
+    # 시스템 모니터링 중지
+    stop_system_monitoring()
+    
+    # 데이터베이스 연결 종료
     db.close()
 
 
@@ -304,6 +331,344 @@ async def hedge(hedge_data: HedgeData, background_tasks: BackgroundTasks):
             return {"result": "error"}
         else:
             return {"result": "success"}
+
+
+# =============================================================================
+# 설정 관리 API 엔드포인트
+# =============================================================================
+
+@app.get("/config/status")
+async def get_system_status():
+    """시스템 상태 조회"""
+    try:
+        status = config_manager.get_system_status()
+        return status
+    except Exception as e:
+        return {"error": f"시스템 상태 조회 중 오류: {str(e)}"}
+
+
+@app.get("/config/env")
+async def get_current_config():
+    """현재 환경 변수 설정 조회 (민감한 정보 마스킹)"""
+    try:
+        config = config_manager.get_current_config()
+        
+        # 민감한 정보 마스킹
+        masked_config = {}
+        for key, value in config.items():
+            if any(keyword in key.upper() for keyword in ['KEY', 'SECRET', 'PASSWORD', 'PASSPHRASE']):
+                masked_config[key] = '*' * 8 if value else ''
+            else:
+                masked_config[key] = value
+        
+        return {
+            "status": "success",
+            "config": masked_config,
+            "total_variables": len(config)
+        }
+    except Exception as e:
+        return {"error": f"설정 조회 중 오류: {str(e)}"}
+
+
+@app.post("/config/kis/add")
+async def add_kis_account(config: KISAccountConfig, background_tasks: BackgroundTasks):
+    """KIS 계정 추가"""
+    try:
+        result = config_manager.add_kis_account(config)
+        background_tasks.add_task(
+            log_message, f"KIS{config.kis_number} 계정 추가 완료"
+        )
+        return result
+    except Exception as e:
+        background_tasks.add_task(
+            log_error_message, traceback.format_exc(), "KIS 계정 추가 오류"
+        )
+        raise e
+
+
+@app.delete("/config/kis/{kis_number}")
+async def remove_kis_account(kis_number: int, background_tasks: BackgroundTasks):
+    """KIS 계정 제거"""
+    try:
+        result = config_manager.remove_kis_account(kis_number)
+        background_tasks.add_task(
+            log_message, f"KIS{kis_number} 계정 제거 완료"
+        )
+        return result
+    except Exception as e:
+        background_tasks.add_task(
+            log_error_message, traceback.format_exc(), "KIS 계정 제거 오류"
+        )
+        raise e
+
+
+@app.post("/config/exchange")
+async def update_exchange_config(config: ExchangeConfig, background_tasks: BackgroundTasks):
+    """거래소 설정 업데이트"""
+    try:
+        result = config_manager.update_exchange_config(config)
+        background_tasks.add_task(
+            log_message, f"{config.exchange} 거래소 설정 업데이트 완료"
+        )
+        return result
+    except Exception as e:
+        background_tasks.add_task(
+            log_error_message, traceback.format_exc(), "거래소 설정 업데이트 오류"
+        )
+        raise e
+
+
+@app.post("/config/env")
+async def update_env_var(config: EnvVarConfig, background_tasks: BackgroundTasks):
+    """환경 변수 업데이트"""
+    try:
+        result = config_manager.update_env_var(config)
+        background_tasks.add_task(
+            log_message, f"{config.name} 환경 변수 업데이트 완료"
+        )
+        return result
+    except Exception as e:
+        background_tasks.add_task(
+            log_error_message, traceback.format_exc(), "환경 변수 업데이트 오류"
+        )
+        raise e
+
+
+@app.post("/config/restart")
+async def restart_services(background_tasks: BackgroundTasks):
+    """서비스 재시작"""
+    try:
+        success = config_manager.restart_services()
+        if success:
+            background_tasks.add_task(log_message, "서비스 재시작 완료")
+            return {"status": "success", "message": "서비스 재시작 완료"}
+        else:
+            background_tasks.add_task(log_error_message, "서비스 재시작 실패", "서비스 관리")
+            return {"status": "error", "message": "서비스 재시작 실패"}
+    except Exception as e:
+        background_tasks.add_task(
+            log_error_message, traceback.format_exc(), "서비스 재시작 오류"
+        )
+        return {"status": "error", "message": f"서비스 재시작 중 오류: {str(e)}"}
+
+
+@app.get("/config/validate")
+async def validate_configuration():
+    """환경 변수 검증"""
+    try:
+        from exchange.utils.validation import validate_environment, get_kis_account_summary
+        
+        is_valid, errors = validate_environment()
+        kis_summary = get_kis_account_summary()
+        
+        return {
+            "status": "success",
+            "valid": is_valid,
+            "errors": errors,
+            "kis_accounts": kis_summary
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"검증 중 오류: {str(e)}"}
+
+
+@app.get("/config/backups")
+async def list_backups():
+    """백업 파일 목록 조회"""
+    try:
+        backup_dir = "/root/backups"
+        if not os.path.exists(backup_dir):
+            return {"status": "success", "backups": []}
+        
+        backups = []
+        for filename in os.listdir(backup_dir):
+            if filename.startswith('.env.'):
+                filepath = os.path.join(backup_dir, filename)
+                stat = os.stat(filepath)
+                backups.append({
+                    "filename": filename,
+                    "size": stat.st_size,
+                    "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                })
+        
+        # 최신 순으로 정렬
+        backups.sort(key=lambda x: x['created'], reverse=True)
+        
+        return {
+            "status": "success",
+            "backups": backups,
+            "total": len(backups)
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"백업 목록 조회 중 오류: {str(e)}"}
+
+
+@app.get("/logs/{log_type}")
+async def get_logs(log_type: str, lines: int = 100):
+    """로그 조회"""
+    try:
+        valid_types = ["main", "order", "error", "kis", "system", "config"]
+        if log_type not in valid_types:
+            return {"status": "error", "message": f"유효하지 않은 로그 타입. 사용 가능: {valid_types}"}
+        
+        recent_logs = poa_logger.get_recent_logs(log_type, lines)
+        
+        return {
+            "status": "success",
+            "log_type": log_type,
+            "lines": len(recent_logs),
+            "logs": recent_logs
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"로그 조회 중 오류: {str(e)}"}
+
+
+@app.get("/logs/files")
+async def get_log_files():
+    """로그 파일 목록 조회"""
+    try:
+        log_files = poa_logger.get_log_files_info()
+        return {
+            "status": "success",
+            "log_files": log_files,
+            "total_files": len(log_files)
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"로그 파일 조회 중 오류: {str(e)}"}
+
+
+@app.post("/logs/cleanup")
+async def cleanup_logs(days_to_keep: int = 30, background_tasks: BackgroundTasks = None):
+    """오래된 로그 정리"""
+    try:
+        if days_to_keep < 1:
+            return {"status": "error", "message": "보관 기간은 최소 1일 이상이어야 합니다"}
+        
+        cleaned_files = poa_logger.cleanup_old_logs(days_to_keep)
+        
+        if background_tasks:
+            background_tasks.add_task(
+                log_system_message, f"로그 정리 완료: {len(cleaned_files)}개 파일 삭제"
+            )
+        
+        return {
+            "status": "success",
+            "message": f"{len(cleaned_files)}개 파일 정리 완료",
+            "cleaned_files": cleaned_files
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"로그 정리 중 오류: {str(e)}"}
+
+
+# =============================================================================
+# 시스템 모니터링 API 엔드포인트
+# =============================================================================
+
+@app.get("/monitor/status")
+async def get_system_metrics():
+    """현재 시스템 메트릭 조회"""
+    try:
+        metrics = get_system_status()
+        return {
+            "status": "success",
+            "metrics": metrics
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"메트릭 수집 오류: {str(e)}"}
+
+
+@app.get("/monitor/history")
+async def get_system_metrics_history(hours: int = 24):
+    """시스템 메트릭 히스토리 조회"""
+    try:
+        if hours < 1 or hours > 168:  # 최대 7일
+            return {"status": "error", "message": "시간 범위는 1-168시간 사이여야 합니다"}
+        
+        history = get_system_history(hours)
+        return {
+            "status": "success",
+            "hours": hours,
+            "data_points": len(history),
+            "history": history
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"히스토리 조회 오류: {str(e)}"}
+
+
+@app.get("/monitor/summary")
+async def get_system_summary_stats():
+    """시스템 요약 통계 조회"""
+    try:
+        summary = get_system_summary()
+        return {
+            "status": "success",
+            "summary": summary
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"요약 통계 조회 오류: {str(e)}"}
+
+
+@app.post("/monitor/gc")
+async def force_garbage_collection(background_tasks: BackgroundTasks):
+    """강제 가비지 컴렉션"""
+    try:
+        result = force_gc()
+        
+        background_tasks.add_task(
+            log_system_message, 
+            f"강제 GC 실행: {result.get('collected_objects', 0)}개 객체 정리"
+        )
+        
+        return {
+            "status": "success",
+            "message": "가비지 컴렉션 완료",
+            "result": result
+        }
+    except Exception as e:
+        background_tasks.add_task(
+            log_error_message, f"가비지 컴렉션 오류: {str(e)}", "MONITOR"
+        )
+        return {"status": "error", "message": f"가비지 컴렉션 오류: {str(e)}"}
+
+
+@app.get("/monitor/health")
+async def system_health_check():
+    """시스템 헬스체크"""
+    try:
+        metrics = get_system_status()
+        
+        # 헬스 상태 판단
+        health_status = "healthy"
+        issues = []
+        
+        if metrics.get("memory_percent", 0) > 85:
+            health_status = "warning"
+            issues.append(f"메모리 사용량 높음: {metrics.get('memory_percent', 0):.1f}%")
+        
+        if metrics.get("cpu_percent", 0) > 80:
+            health_status = "warning"
+            issues.append(f"CPU 사용량 높음: {metrics.get('cpu_percent', 0):.1f}%")
+        
+        if metrics.get("disk_percent", 0) > 85:
+            health_status = "warning"
+            issues.append(f"디스크 사용량 높음: {metrics.get('disk_percent', 0):.1f}%")
+        
+        if metrics.get("memory_percent", 0) > 95 or metrics.get("cpu_percent", 0) > 95:
+            health_status = "critical"
+        
+        return {
+            "status": "success",
+            "health_status": health_status,
+            "issues": issues,
+            "metrics": metrics,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error", 
+            "health_status": "error",
+            "message": f"헬스체크 오류: {str(e)}"
+        }
 
     elif hedge == "OFF":
         try:

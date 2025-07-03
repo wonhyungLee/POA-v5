@@ -1,0 +1,103 @@
+# POA 시스템 동적 설정 파일
+# 이 파일은 언제든지 수정하여 시스템 설정을 변경할 수 있습니다.
+
+# 시스템 기본 설정
+system:
+  app_name: "POA"
+  port: 80
+  log_level: "INFO"
+  timezone: "Asia/Seoul"
+  
+# 데이터베이스 설정
+database:
+  id: "poa@admin.com"
+  password: "poabot!@#$"
+  port: 8090
+  
+# 보안 설정
+security:
+  password: "changeme_secure_password"  # 반드시 변경하세요!
+  whitelist:
+    - "127.0.0.1"
+    - "52.89.214.238"    # Uptime Robot
+    - "34.212.75.30"     # Uptime Robot
+    - "54.218.53.128"    # Uptime Robot
+    - "52.32.178.7"      # Uptime Robot
+    
+# Discord 알림 설정
+discord:
+  webhook_url: ""  # Discord 웹훅 URL (선택사항)
+  
+# 거래소 API 설정 (필요한 거래소만 설정)
+exchanges:
+  binance:
+    enabled: false
+    key: ""
+    secret: ""
+    
+  upbit:
+    enabled: false
+    key: ""
+    secret: ""
+    
+  bybit:
+    enabled: false
+    key: ""
+    secret: ""
+    
+  bitget:
+    enabled: false
+    key: ""
+    secret: ""
+    passphrase: ""
+    
+  okx:
+    enabled: false
+    key: ""
+    secret: ""
+    passphrase: ""
+    
+# KIS 계정 설정 (1-50번까지 지원)
+kis_accounts:
+  # 예시:
+  # - number: 1
+  #   key: "your_app_key"
+  #   secret: "your_app_secret"
+  #   account_number: "your_account_number"
+  #   account_code: "01"  # 보통 "01"
+  # - number: 2
+  #   key: "another_app_key"
+  #   secret: "another_app_secret"
+  #   account_number: "another_account_number"
+  #   account_code: "01"
+  
+# 서비스 설정
+services:
+  caddy:
+    enabled: true
+    domain: ""  # 도메인이 있는 경우 설정 (예: poa.example.com)
+    
+  pm2:
+    instances: 1  # PM2 인스턴스 수
+    exec_mode: "fork"  # "fork" 또는 "cluster"
+    
+  monitoring:
+    enabled: true
+    interval: 60  # 모니터링 간격 (초)
+    
+# 로그 설정
+logging:
+  max_size: "100M"  # 로그 파일 최대 크기
+  retention_days: 30  # 로그 보관 일수
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  
+# 백업 설정
+backup:
+  enabled: true
+  interval: "daily"  # daily, weekly, monthly
+  retention_count: 7  # 보관할 백업 개수
+  
+# 개발 모드 설정
+development:
+  debug: false
+  test_mode: false
