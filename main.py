@@ -170,7 +170,21 @@ def log_error(error_message, order_info):
 
 @app.post("/order")
 @app.post("/")
-async def order(order_info: MarketOrder, background_tasks: BackgroundTasks):
+async def order(request: Request, background_tasks: BackgroundTasks):
+    order_data = await request.json()
+    
+    # Manually fix the price if it's a TradingView placeholder
+    price = order_data.get("price")
+    if isinstance(price, str) and price.startswith('{') and price.endswith('}'):
+        order_data["price"] = None
+
+    try:
+        order_info = MarketOrder(**order_data)
+    except Exception as e:
+        log_validation_error_message(f"[Validation Error] {e}\n {order_data}")
+        # Re-raise the exception to be handled by FastAPI's error handling
+        raise
+
     order_result = None
     try:
         exchange_name = order_info.exchange
@@ -212,6 +226,7 @@ async def order(order_info: MarketOrder, background_tasks: BackgroundTasks):
 
     finally:
         pass
+
 
 
 def get_hedge_records(base):

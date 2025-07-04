@@ -1,10 +1,10 @@
-from exchange.model import Settings
+from exchange.model import ExtendedSettings
 from functools import lru_cache
 
 
 @lru_cache()
 def get_settings():
-    return Settings()
+    return ExtendedSettings()
 
 
 settings = get_settings()

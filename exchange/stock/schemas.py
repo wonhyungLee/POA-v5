@@ -43,7 +43,7 @@ class TransactionId(str, Enum):
     korea_paper_sell = "VTTC0801U"
     korea_paper_cancel = "VTTC0803U"
 
-    usa_buy = "JTTT1002U"
+    usa_buy = "TTTT1002U"
     usa_sell = "JTTT1006U"
 
     usa_paper_buy = "VTTT1002U"
